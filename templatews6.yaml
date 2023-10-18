@@ -1,0 +1,122 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: "Workshop6 Template"
+
+Resources:
+  WorkshopIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: WorkshopS3IAMRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: "WorkshopS3FullAccess"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: "s3:*"
+                Resource: "*"
+
+  MyLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Lambda function to get buckets"
+      FunctionName: "MyLambdaFunction"
+      Handler: "index.lambda_handler"
+      Role: !GetAtt WorkshopIAMRole.Arn
+      Runtime: "python3.8"
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import boto3
+
+          s3_client = boto3.client('s3')
+
+          def lambda_handler(event, context):
+              # Get the list of all S3 buckets
+              buckets = s3_client.list_buckets()["Buckets"]
+              
+              # Create a dictionary to store bucket names and their objects
+              bucket_objects = {}
+              
+              # Iterate through each bucket and get the list of objects
+              for bucket in buckets:
+                  bucket_name = bucket["Name"]
+                  objects = []
+                  response = s3_client.list_objects_v2(Bucket=bucket_name)
+                  for obj in response.get("Contents", []):
+                      object_key = obj["Key"]
+                      # Get the content of the object
+                      object_content = s3_client.get_object(Bucket=bucket_name, Key=object_key)["Body"].read().decode('utf-8')
+                      # Store object key and content in a dictionary
+                      objects.append({
+                          "Key": object_key,
+                          "Content": object_content
+                      })
+                  bucket_objects[bucket_name] = objects
+              
+              # Construct the response with CORS headers
+              response = {
+                  "statusCode": 200,
+                  "body": bucket_objects,
+                  "headers": {
+                      "Content-Type": "application/json",
+                      "Access-Control-Allow-Origin": "*",  # Allow requests from any origin
+                      "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token",
+                      "Access-Control-Allow-Methods": "OPTIONS,GET,POST"
+                  }
+              }
+              
+              return response
+
+  s3APIgateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: LambdaApi
+
+  Resource:
+    Type: "AWS::ApiGateway::Resource"
+    Properties:
+      RestApiId: !Ref s3APIgateway
+      ParentId: !GetAtt s3APIgateway.RootResourceId
+      PathPart: getbuckets
+
+  ApiMethod:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref s3APIgateway
+      ResourceId: !GetAtt Resource.ResourceId
+      HttpMethod: GET
+      AuthorizationType: NONE
+      MethodResponses:
+        - StatusCode: 200
+      Integration:
+        Type: AWS
+        IntegrationResponses:
+          - StatusCode: 200
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/${MyLambdaFunction.Arn}/invocations"
+
+  ApiDeployment:
+    DependsOn: ApiMethod
+    Type: "AWS::ApiGateway::Deployment"
+    Properties:
+      RestApiId: !Ref s3APIgateway
+      Description: My deployment to dev
+      StageName: dev
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt MyLambdaFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceAccount: 378407054436
